@@ -1,0 +1,11 @@
+# Credenciales y tokens de Spotify
+spotify.token.json
+spotify.oauth.json
+
+# Dependencias
+node_modules/
+
+# Backups locales
+*.backup
+*.backup-*
+*.bak

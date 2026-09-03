@@ -1,0 +1,10 @@
+{
+  "name": "mmm-tuasistente-spotify",
+  "version": "0.2.0",
+  "description": "Spotify controller and search module for MagicMirror using TuAsistente Librespot socket and Spotify Web API",
+  "main": "node_helper.js",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
