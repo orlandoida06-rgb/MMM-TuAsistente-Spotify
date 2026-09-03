@@ -211,7 +211,7 @@ Module.register("MMM-TuAsistente-Spotify", {
                 "spotify-result-cover";
 
               cover.src =
-                result.cover;
+                this.getCoverUrl(result.cover);
 
               cover.alt =
                 "";
@@ -291,7 +291,7 @@ Module.register("MMM-TuAsistente-Spotify", {
         "spotify-current-cover";
 
       cover.src =
-        this.spotify.cover;
+        this.getCoverUrl(this.spotify.cover);
 
       cover.alt =
         "";
@@ -518,6 +518,29 @@ Module.register("MMM-TuAsistente-Spotify", {
      SOCKET
    ======================================================== */
 
+  // ========================================================
+  // PROXY LOCAL PARA PORTADAS DE SPOTIFY
+  // ========================================================
+
+  getCoverUrl: function (url) {
+
+    if (!url) {
+      return "";
+    }
+
+    if (
+      /^https:\/\/i\.scdn\.co\/image\//.test(url)
+    ) {
+
+      return (
+        "http://127.0.0.1:8888/cover?url=" +
+        encodeURIComponent(url)
+      );
+    }
+
+    return url;
+  },
+
   socketNotificationReceived:
     function (
       notification,
@@ -535,6 +558,17 @@ Module.register("MMM-TuAsistente-Spotify", {
             this.spotify,
             payload
           );
+
+        console.log(
+          "[MMM-TuAsistente-Spotify] ESTADO:",
+          JSON.stringify({
+            title: this.spotify.title,
+            artist: this.spotify.artist,
+            uri: this.spotify.uri,
+            cover: this.spotify.cover,
+            playing: this.spotify.playing
+          })
+        );
 
         // ====================================================
         // CONTROL DE VISIBILIDAD

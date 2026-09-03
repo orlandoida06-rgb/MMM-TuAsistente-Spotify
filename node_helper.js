@@ -36,6 +36,9 @@ module.exports = NodeHelper.create({
     this.eventsPosition = 0;
     this.oauthPending = null;
 
+    // Caché de portadas obtenidas directamente desde Spotify
+    this.coverCache = new Map();
+
     this.loadOAuthConfig();
     this.loadToken();
     this.startOAuthServer();
@@ -250,6 +253,75 @@ module.exports = NodeHelper.create({
           ok: false,
           error: error.message
         });
+      }
+    });
+
+    // Proxy local para portadas de Spotify.
+    // Evita que Electron tenga que cargar directamente i.scdn.co.
+    app.get("/cover", async (req, res) => {
+
+      try {
+
+        const imageUrl =
+          String(req.query.url || "").trim();
+
+        if (
+          !imageUrl ||
+          !/^https:\/\/i\.scdn\.co\/image\//.test(imageUrl)
+        ) {
+          return res.status(400).send("URL de portada inválida");
+        }
+
+        const response =
+          await fetch(imageUrl);
+
+        if (!response.ok) {
+          console.error(
+            "[MMM-TuAsistente-Spotify] Error descargando portada:",
+            response.status
+          );
+
+          return res.status(response.status).send(
+            "No se pudo obtener la portada"
+          );
+        }
+
+        const contentType =
+          response.headers.get("content-type") ||
+          "image/jpeg";
+
+        const buffer =
+          Buffer.from(
+            await response.arrayBuffer()
+          );
+
+        res.setHeader(
+          "Content-Type",
+          contentType
+        );
+
+        res.setHeader(
+          "Cache-Control",
+          "public, max-age=86400"
+        );
+
+        res.setHeader(
+          "Access-Control-Allow-Origin",
+          "*"
+        );
+
+        res.send(buffer);
+
+      } catch (err) {
+
+        console.error(
+          "[MMM-TuAsistente-Spotify] Error proxy portada:",
+          err.message
+        );
+
+        res.status(500).send(
+          "Error obteniendo portada"
+        );
       }
     });
 
@@ -613,7 +685,7 @@ module.exports = NodeHelper.create({
       );
     }
 
-    return (
+    const results = (
       data.tracks?.items || []
     ).map(track => ({
       uri: track.uri,
@@ -629,6 +701,94 @@ module.exports = NodeHelper.create({
       spotifyUrl:
         track.external_urls?.spotify || ""
     }));
+
+    // Guardamos la portada asociada a cada URI de Spotify
+    for (const track of results) {
+      if (track.uri && track.cover) {
+        this.coverCache.set(
+          track.uri,
+          track.cover
+        );
+      }
+    }
+
+    return results;
+  },
+
+  getSpotifyTrackCover: async function (uri) {
+
+    if (!uri) {
+      return "";
+    }
+
+    const match =
+      uri.match(/^spotify:track:([A-Za-z0-9]+)$/);
+
+    if (!match) {
+      return "";
+    }
+
+    const trackId = match[1];
+
+    // Primero comprobamos la caché
+    const cached =
+      this.coverCache.get(uri);
+
+    if (cached) {
+      return cached;
+    }
+
+    try {
+
+      console.log(
+        "[MMM-TuAsistente-Spotify] Consultando portada Spotify:",
+        trackId
+      );
+
+      const response =
+        await this.spotifyFetch(
+          "https://api.spotify.com/v1/tracks/" +
+          trackId
+        );
+
+      const data =
+        await response.json();
+
+      if (!response.ok) {
+        console.error(
+          "[MMM-TuAsistente-Spotify] Error obteniendo pista:",
+          data.error?.message || response.status
+        );
+        return "";
+      }
+
+      const cover =
+        data.album?.images?.[0]?.url || "";
+
+      if (cover) {
+
+        this.coverCache.set(
+          uri,
+          cover
+        );
+
+        console.log(
+          "[MMM-TuAsistente-Spotify] PORTADA API:",
+          cover
+        );
+      }
+
+      return cover;
+
+    } catch (err) {
+
+      console.error(
+        "[MMM-TuAsistente-Spotify] Error portada API:",
+        err.message
+      );
+
+      return "";
+    }
   },
 
   sendAuthState: function () {
@@ -883,32 +1043,56 @@ module.exports = NodeHelper.create({
 
     try {
 
+      /*
+       * LibreSpot genera continuamente:
+       *
+       * /tmp/tuasistente-spotify-events.ndjson
+       *
+       * El archivo puede no existir todavía cuando arranca
+       * MagicMirror, por eso no hacemos return definitivo.
+       */
+
       if (!fs.existsSync(this.eventsPath)) {
-        return;
+
+        try {
+          fs.closeSync(
+            fs.openSync(this.eventsPath, "a")
+          );
+        } catch (err) {
+          console.error(
+            "[MMM-TuAsistente-Spotify] No se pudo crear cola de eventos:",
+            err.message
+          );
+        }
       }
 
-      const stats =
-        fs.statSync(this.eventsPath);
+      if (fs.existsSync(this.eventsPath)) {
 
-      this.eventsPosition =
-        stats.size;
+        const stats =
+          fs.statSync(this.eventsPath);
 
-      fs.watchFile(
-        this.eventsPath,
-        { interval: 500 },
-        () => {
-          this.readNewEvents();
-        }
-      );
+        this.eventsPosition =
+          stats.size;
 
-      console.log(
-        "[MMM-TuAsistente-Spotify] Watcher de eventos activo."
-      );
+        fs.watchFile(
+          this.eventsPath,
+          { interval: 500 },
+          () => {
+            this.readNewEvents();
+          }
+        );
+
+        console.log(
+          "[MMM-TuAsistente-Spotify] Watcher de LibreSpot activo:",
+          this.eventsPath
+        );
+
+      }
 
     } catch (err) {
 
       console.error(
-        "[MMM-TuAsistente-Spotify] Error watcher:",
+        "[MMM-TuAsistente-Spotify] Error iniciando watcher:",
         err.message
       );
     }
@@ -918,8 +1102,17 @@ module.exports = NodeHelper.create({
 
     try {
 
+      if (!fs.existsSync(this.eventsPath)) {
+        return;
+      }
+
       const stats =
         fs.statSync(this.eventsPath);
+
+      /*
+       * Si LibreSpot ha truncado/recreado la cola,
+       * empezamos desde el principio.
+       */
 
       if (
         stats.size <
@@ -961,33 +1154,38 @@ module.exports = NodeHelper.create({
       this.eventsPosition =
         stats.size;
 
-      buffer
-        .toString("utf8")
-        .split("\n")
-        .filter(line => line.trim())
-        .forEach(line => {
+      const lines =
+        buffer
+          .toString("utf8")
+          .split("\n")
+          .filter(line => line.trim());
 
-          try {
+      for (const line of lines) {
 
-            this.processSpotifyEvent(
-              JSON.parse(line)
-            );
+        try {
 
-          } catch (err) {
+          this.processSpotifyEvent(
+            JSON.parse(line)
+          );
 
-            console.error(
-              "[MMM-TuAsistente-Spotify] JSON inválido:",
-              err.message
-            );
-          }
-        });
+        } catch (err) {
+
+          console.error(
+            "[MMM-TuAsistente-Spotify] JSON de LibreSpot inválido:",
+            err.message
+          );
+
+        }
+
+      }
 
     } catch (err) {
 
       console.error(
-        "[MMM-TuAsistente-Spotify] Error eventos:",
+        "[MMM-TuAsistente-Spotify] Error leyendo eventos:",
         err.message
       );
+
     }
   },
 
@@ -997,11 +1195,44 @@ module.exports = NodeHelper.create({
       return;
     }
 
+    console.log(
+      "[MMM-TuAsistente-Spotify] LibreSpot:",
+      event.event
+    );
+
     switch (event.event) {
 
       case "session_connected":
+
         this.spotify.connected = true;
+
         break;
+
+
+      case "session_disconnected":
+
+        this.spotify.connected = false;
+        this.spotify.playing = false;
+        this.spotify.loading = false;
+
+        break;
+
+
+      case "loading":
+
+        this.spotify.connected = true;
+        this.spotify.loading = true;
+
+        if (event.trackId) {
+
+          this.spotify.uri =
+            "spotify:track:" +
+            event.trackId;
+
+        }
+
+        break;
+
 
       case "track_changed":
 
@@ -1018,7 +1249,12 @@ module.exports = NodeHelper.create({
           event.album || "";
 
         this.spotify.uri =
-          event.uri || "";
+          event.uri ||
+          (
+            event.trackId
+              ? "spotify:track:" + event.trackId
+              : ""
+          );
 
         this.spotify.position =
           Number(event.positionMs || 0);
@@ -1029,22 +1265,69 @@ module.exports = NodeHelper.create({
         this.spotify.volume =
           this.normalizeVolume(event.volume);
 
-        this.spotify.cover =
+        const trackUri =
+          this.spotify.uri;
+
+        const librespotCover =
           this.getFirstCover(event.covers);
 
-        break;
+        const cachedCover =
+          trackUri
+            ? this.coverCache.get(trackUri) || ""
+            : "";
 
-      case "loading":
+        // Al cambiar de pista nunca conservamos la portada
+        // de la canción anterior.
+        this.spotify.cover =
+          librespotCover ||
+          cachedCover ||
+          "";
 
-        this.spotify.loading = true;
+        console.log(
+          "[MMM-TuAsistente-Spotify] COVER DEBUG:",
+          JSON.stringify({
+            uri: this.spotify.uri,
+            librespotCover: librespotCover,
+            cachedCover: cachedCover,
+            finalCover: this.spotify.cover
+          })
+        );
 
-        if (event.trackId) {
-          this.spotify.uri =
-            "spotify:track:" +
-            event.trackId;
+        // Si LibreSpot no proporciona portada,
+        // la obtenemos directamente desde Spotify.
+        if (
+          !this.spotify.cover &&
+          this.spotify.uri
+        ) {
+
+          this.getSpotifyTrackCover(
+            this.spotify.uri
+          ).then(cover => {
+
+            if (cover) {
+
+              this.spotify.cover = cover;
+
+              console.log(
+                "[MMM-TuAsistente-Spotify] COVER API ASIGNADA:",
+                cover
+              );
+
+              this.sendState();
+            }
+
+          }).catch(err => {
+
+            console.error(
+              "[MMM-TuAsistente-Spotify] Error portada:",
+              err.message
+            );
+
+          });
         }
 
         break;
+
 
       case "playing":
 
@@ -1054,13 +1337,22 @@ module.exports = NodeHelper.create({
 
         break;
 
+
       case "paused":
+
         this.spotify.playing = false;
+        this.spotify.loading = false;
+
         break;
 
+
       case "stopped":
+
         this.spotify.playing = false;
+        this.spotify.loading = false;
+
         break;
+
 
       case "volume_changed":
 
@@ -1069,12 +1361,14 @@ module.exports = NodeHelper.create({
 
         break;
 
+
       case "shuffle_changed":
 
         this.spotify.shuffle =
           String(event.shuffle) === "true";
 
         break;
+
 
       case "repeat_changed":
 
@@ -1083,41 +1377,21 @@ module.exports = NodeHelper.create({
 
         break;
 
-      case "session_disconnected":
 
-        this.spotify.connected = false;
-        this.spotify.playing = false;
+      /*
+       * Estos eventos son informativos y no deben
+       * alterar el estado de reproducción.
+       */
+
+      case "session_client_changed":
+      case "auto_play_changed":
+      case "filter_explicit_content_changed":
 
         break;
+
     }
 
     this.sendState();
-  },
-
-  normalizeVolume: function (value) {
-
-    const volume = Number(value);
-
-    if (!Number.isFinite(volume)) {
-      return 0;
-    }
-
-    if (
-      volume >= 0 &&
-      volume <= 100
-    ) {
-      return Math.round(volume);
-    }
-
-    return Math.round(
-      Math.max(
-        0,
-        Math.min(
-          100,
-          volume / 655.35
-        )
-      )
-    );
   },
 
   getFirstCover: function (covers) {
@@ -1126,10 +1400,77 @@ module.exports = NodeHelper.create({
       return "";
     }
 
-    return String(covers)
-      .split(/\r?\n/)
-      .map(url => url.trim())
-      .filter(Boolean)[0] || "";
+    if (Array.isArray(covers)) {
+      return covers.find(Boolean) || "";
+    }
+
+    if (typeof covers === "string") {
+
+      const value = covers.trim();
+
+      if (!value) {
+        return "";
+      }
+
+      // LibreSpot puede enviar varias portadas
+      // separadas por saltos de línea, comas o espacios.
+      const parts = value
+        .split(/[\\s,]+/)
+        .map(v => v.trim())
+        .filter(Boolean);
+
+      for (const part of parts) {
+        if (
+          part.startsWith("http://") ||
+          part.startsWith("https://")
+        ) {
+          return part;
+        }
+      }
+
+      return "";
+    }
+
+    return "";
+  },
+
+  normalizeVolume: function (value) {
+
+    const volume =
+      Number(value);
+
+    if (!Number.isFinite(volume)) {
+      return 0;
+    }
+
+    /*
+     * LibreSpot entrega normalmente el volumen
+     * como rango 0..65535.
+     */
+
+    if (volume > 100) {
+
+      return Math.round(
+        Math.max(
+          0,
+          Math.min(
+            100,
+            (volume / 65535) * 100
+          )
+        )
+      );
+
+    }
+
+    return Math.round(
+      Math.max(
+        0,
+        Math.min(
+          100,
+          volume
+        )
+      )
+    );
   },
 
   sendState: function () {
