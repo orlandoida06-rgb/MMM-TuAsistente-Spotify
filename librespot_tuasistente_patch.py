@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 from pathlib import Path
+import re
 import sys
+
 
 SOCKET = "/tmp/tuasistente-spotify.sock"
 
@@ -24,47 +26,48 @@ def main():
     text = source.read_text()
 
     # ------------------------------------------------------------
-    # Ya parcheado
+    # YA PARCHEADO
     # ------------------------------------------------------------
+
     if "TuAsistente Spotify control socket" in text:
         print("[OK] Parche TuAsistente ya aplicado.")
         return
 
     # ------------------------------------------------------------
-    # Imports Tokio
+    # IMPORTS
     # ------------------------------------------------------------
-    old_import = """use tokio::{
-    io::AsyncBufReadExt,
-    sync::Semaphore,
-};"""
 
-    new_import = """use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixListener,
-    sync::{mpsc, oneshot, Semaphore},
-};"""
+    # UnixListener + mpsc + oneshot
+    if "use tokio::net::UnixListener;" not in text:
+        anchor = "use tokio::sync::Semaphore;"
+        if anchor in text:
+            text = text.replace(
+                anchor,
+                "use tokio::io::{AsyncBufReadExt, AsyncWriteExt};\n"
+                "use tokio::net::UnixListener;\n"
+                "use tokio::sync::{mpsc, oneshot, Semaphore};",
+                1,
+            )
+        else:
+            fail("No se encontró el import tokio::sync::Semaphore.")
 
-    if old_import in text:
-        text = text.replace(old_import, new_import, 1)
-    else:
-        # Variante usada en algunas revisiones de v0.8.0
-        old_import2 = """use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    sync::Semaphore,
-};"""
+    # El código utiliza PermissionsExt para chmod 660.
+    if "use std::os::unix::fs::PermissionsExt;" not in text:
+        anchor = "use std::{"
+        if anchor in text:
+            text = text.replace(
+                anchor,
+                "use std::os::unix::fs::PermissionsExt;\n"
+                "use std::{",
+                1,
+            )
+        else:
+            fail("No se encontró el bloque std:: para añadir PermissionsExt.")
 
-        if old_import2 in text:
-            text = text.replace(old_import2, new_import, 1)
-        elif "UnixListener" not in text:
-            fail("No se encontró un bloque Tokio compatible para aplicar el parche.")
 
     # ------------------------------------------------------------
-    # Socket + canal de control
+    # SOCKET + CANAL DE CONTROL
     # ------------------------------------------------------------
-    marker = "    let session = Session::new(session_config);"
-
-    if marker not in text:
-        fail("No se encontró el punto de inserción de Session::new().")
 
     socket_block = r'''    // ------------------------------------------------------------
     // CONTROL LOCAL TUASISTENTE
@@ -110,7 +113,7 @@ def main():
             let tx = control_tx.clone();
 
             tokio::spawn(async move {
-                let mut reader = BufReader::new(&mut stream);
+                let mut reader = tokio::io::BufReader::new(&mut stream);
                 let mut command = String::new();
 
                 if reader.read_line(&mut command).await.is_err() {
@@ -145,15 +148,34 @@ def main():
 
 '''
 
-    text = text.replace(marker, socket_block + marker, 1)
+    # ------------------------------------------------------------
+    # PUNTO DE INSERCIÓN
+    # ------------------------------------------------------------
 
-    # ------------------------------------------------------------
-    # Rama de control dentro del tokio::select!
-    # ------------------------------------------------------------
+    # En LibreSpot v0.8.0 actual el player se crea justo antes
+    # de la primera tokio::select! principal.
     select_marker = "        tokio::select! {"
 
     if select_marker not in text:
         fail("No se encontró tokio::select! principal.")
+
+    # Insertamos el socket justo antes del loop principal.
+    # Esto garantiza que spirc/control_rx estén disponibles para
+    # la rama de control.
+    loop_marker = "    loop {\n" + select_marker
+
+    if loop_marker not in text:
+        fail("No se encontró el loop principal de LibreSpot.")
+
+    text = text.replace(
+        loop_marker,
+        socket_block + "    loop {\n" + select_marker,
+        1,
+    )
+
+    # ------------------------------------------------------------
+    # RAMA DE CONTROL DENTRO DEL tokio::select!
+    # ------------------------------------------------------------
 
     control_branch = r'''            request = control_rx.recv() => {
                 if let Some((command, reply)) = request {
@@ -189,11 +211,17 @@ def main():
 
 '''
 
-    text = text.replace(
-        select_marker,
-        select_marker + "\n" + control_branch,
-        1,
-    )
+    # Solo insertar la rama una vez.
+    if "request = control_rx.recv()" not in text:
+        text = text.replace(
+            select_marker,
+            select_marker + "\n" + control_branch,
+            1,
+        )
+
+    # ------------------------------------------------------------
+    # ESCRIBIR
+    # ------------------------------------------------------------
 
     source.write_text(text)
 
