@@ -367,3 +367,32 @@ echo "=============================================="
 echo "   SPOTIFY / LIBRESPOT LISTO"
 echo "=============================================="
 echo
+
+# ============================================================
+# EVENTOS DE REPRODUCCIÓN LIBRESPOT
+# ============================================================
+
+EVENT_HANDLER="$SCRIPT_DIR/spotify_event_handler.sh"
+EVENT_HANDLER_INSTALL="/opt/tuasistente/bin/spotify_event_handler.sh"
+
+if [[ ! -f "$EVENT_HANDLER" ]]; then
+    echo "[ERROR] No existe el handler de eventos:"
+    echo "        $EVENT_HANDLER"
+    exit 1
+fi
+
+sudo mkdir -p /opt/tuasistente/bin
+sudo cp "$EVENT_HANDLER" "$EVENT_HANDLER_INSTALL"
+sudo chown pi:pi "$EVENT_HANDLER_INSTALL"
+sudo chmod 755 "$EVENT_HANDLER_INSTALL"
+
+echo "[OK] Handler de eventos instalado."
+
+# Reescribir el servicio para incluir --onevent.
+sudo sed -i \
+    's#--system-cache /home/pi/.config/tuasistente/librespot#--system-cache /home/pi/.config/tuasistente/librespot \\\n    --onevent /opt/tuasistente/bin/spotify_event_handler.sh#' \
+    "$LIBRESPOT_SERVICE"
+
+sudo systemctl daemon-reload
+
+echo "[OK] Eventos LibreSpot habilitados."
