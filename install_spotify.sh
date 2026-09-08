@@ -19,6 +19,10 @@ LIBRESPOT_CACHE="/home/pi/.config/tuasistente/librespot"
 LIBRESPOT_SERVICE="/etc/systemd/system/tuasistente-spotify.service"
 SOCKET="/tmp/tuasistente-spotify.sock"
 
+EVENT_HANDLER="$SCRIPT_DIR/spotify_event_handler.sh"
+EVENT_HANDLER_INSTALL="/opt/tuasistente/bin/spotify_event_handler.sh"
+EVENTS="/tmp/tuasistente-spotify-events.ndjson"
+
 # ============================================================
 # ARQUITECTURA
 # ============================================================
@@ -98,12 +102,6 @@ if [[ -d "$LIBRESPOT_DIR/.git" ]]; then
 
     cd "$LIBRESPOT_DIR"
 
-    # ------------------------------------------------------------
-    # IMPORTANTE:
-    # No hacemos git checkout si main.rs tiene modificaciones
-    # locales. Nuestro socket TuAsistente vive precisamente ahí.
-    # ------------------------------------------------------------
-
     if git diff --quiet -- src/main.rs; then
 
         echo "[INFO] Source limpio."
@@ -131,7 +129,11 @@ else
 
     sudo rm -rf "$LIBRESPOT_DIR"
 
-    git clone         --depth 1         --branch "$LIBRESPOT_VERSION"         "$LIBRESPOT_URL"         "$LIBRESPOT_DIR"
+    git clone \
+        --depth 1 \
+        --branch "$LIBRESPOT_VERSION" \
+        "$LIBRESPOT_URL" \
+        "$LIBRESPOT_DIR"
 
     sudo chown -R pi:pi "$LIBRESPOT_DIR"
 
@@ -167,18 +169,15 @@ echo "[OK] Integración TuAsistente comprobada."
 
 NEED_BUILD=false
 
-# ------------------------------------------------------------
-# Detectar si el source del módulo TuAsistente es más reciente
-# que el binario existente.
-# ------------------------------------------------------------
-
 if [[ ! -x "$LIBRESPOT_BIN" ]]; then
     NEED_BUILD=true
     echo "[INFO] No existe el binario LibreSpot."
+
 elif [[ "$LIBRESPOT_DIR/src/main.rs" -nt "$LIBRESPOT_BIN" ]]; then
     NEED_BUILD=true
     echo "[INFO] main.rs es más reciente que el binario."
     echo "[INFO] Será necesaria una recompilación."
+
 else
     echo "[OK] Binario LibreSpot actualizado."
 fi
@@ -189,9 +188,7 @@ if [[ "$NEED_BUILD" == true ]]; then
     echo "[INFO] Compilando LibreSpot con integración TuAsistente..."
     echo "[INFO] Puede tardar varios minutos en ARM64."
 
-    # Forzamos recompilación cuando el source del parche cambió.
     cargo clean
-
     cargo build --release
 
 else
@@ -220,6 +217,37 @@ chmod 700 "$LIBRESPOT_CACHE"
 echo "[OK] Cache: $LIBRESPOT_CACHE"
 
 # ============================================================
+# EVENTOS DE REPRODUCCIÓN
+# ============================================================
+
+echo
+echo "[INFO] Preparando eventos de reproducción..."
+
+if [[ ! -f "$EVENT_HANDLER" ]]; then
+    echo "[ERROR] No existe el handler de eventos:"
+    echo "        $EVENT_HANDLER"
+    exit 1
+fi
+
+sudo mkdir -p /opt/tuasistente/bin
+
+sudo cp \
+    "$EVENT_HANDLER" \
+    "$EVENT_HANDLER_INSTALL"
+
+sudo chown pi:pi "$EVENT_HANDLER_INSTALL"
+sudo chmod 755 "$EVENT_HANDLER_INSTALL"
+
+touch "$EVENTS"
+chmod 644 "$EVENTS"
+
+echo "[OK] Handler de eventos instalado:"
+echo "     $EVENT_HANDLER_INSTALL"
+
+echo "[OK] Registro de eventos:"
+echo "     $EVENTS"
+
+# ============================================================
 # SERVICIO
 # ============================================================
 
@@ -244,7 +272,8 @@ ExecStart=/opt/tuasistente/librespot/target/release/librespot \
     --name TuAsistente \
     --backend rodio \
     --device pipewire \
-    --system-cache /home/pi/.config/tuasistente/librespot
+    --system-cache /home/pi/.config/tuasistente/librespot \
+    --onevent /opt/tuasistente/bin/spotify_event_handler.sh
 
 Restart=on-failure
 RestartSec=5
@@ -255,6 +284,8 @@ SERVICE
 
 sudo systemctl daemon-reload
 sudo systemctl enable tuasistente-spotify.service >/dev/null
+
+echo "[OK] Servicio instalado con eventos LibreSpot."
 
 # ============================================================
 # ARRANQUE
@@ -282,6 +313,22 @@ if ! systemctl is-active --quiet tuasistente-spotify.service; then
 fi
 
 echo "[OK] Servicio LibreSpot activo."
+
+# ============================================================
+# COMPROBAR EVENTOS EN EL SERVICIO
+# ============================================================
+
+echo
+echo "[INFO] Comprobando configuración --onevent..."
+
+EXEC_START="$(systemctl show tuasistente-spotify.service -p ExecStart --value)"
+
+if [[ "$EXEC_START" == *"--onevent /opt/tuasistente/bin/spotify_event_handler.sh"* ]]; then
+    echo "[OK] --onevent configurado correctamente."
+else
+    echo "[ERROR] --onevent no está configurado en el servicio."
+    exit 1
+fi
 
 # ============================================================
 # SOCKET
@@ -327,15 +374,18 @@ if command -v socat >/dev/null 2>&1; then
 
     if [[ "$PAUSE_RESULT" == "OK" && "$PLAY_RESULT" == "OK" ]]; then
         echo "[OK] Control Spotify funcionando."
+
     elif [[ "$PAUSE_RESULT" == "ERROR NOT_CONNECTED" ||
             "$PLAY_RESULT" == "ERROR NOT_CONNECTED" ]]; then
         echo "[INFO] Socket funcionando, pero Spotify aún no está conectado."
+
     else
         echo "[ERROR] El socket existe pero el control no respondió correctamente."
         exit 1
     fi
 
 else
+
     echo "[AVISO] socat no está instalado."
     echo "[AVISO] Se omite la prueba funcional."
 fi
@@ -367,32 +417,3 @@ echo "=============================================="
 echo "   SPOTIFY / LIBRESPOT LISTO"
 echo "=============================================="
 echo
-
-# ============================================================
-# EVENTOS DE REPRODUCCIÓN LIBRESPOT
-# ============================================================
-
-EVENT_HANDLER="$SCRIPT_DIR/spotify_event_handler.sh"
-EVENT_HANDLER_INSTALL="/opt/tuasistente/bin/spotify_event_handler.sh"
-
-if [[ ! -f "$EVENT_HANDLER" ]]; then
-    echo "[ERROR] No existe el handler de eventos:"
-    echo "        $EVENT_HANDLER"
-    exit 1
-fi
-
-sudo mkdir -p /opt/tuasistente/bin
-sudo cp "$EVENT_HANDLER" "$EVENT_HANDLER_INSTALL"
-sudo chown pi:pi "$EVENT_HANDLER_INSTALL"
-sudo chmod 755 "$EVENT_HANDLER_INSTALL"
-
-echo "[OK] Handler de eventos instalado."
-
-# Reescribir el servicio para incluir --onevent.
-sudo sed -i \
-    's#--system-cache /home/pi/.config/tuasistente/librespot#--system-cache /home/pi/.config/tuasistente/librespot \\\n    --onevent /opt/tuasistente/bin/spotify_event_handler.sh#' \
-    "$LIBRESPOT_SERVICE"
-
-sudo systemctl daemon-reload
-
-echo "[OK] Eventos LibreSpot habilitados."
