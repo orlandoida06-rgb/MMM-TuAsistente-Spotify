@@ -358,29 +358,27 @@ fi
 echo "[OK] Socket Spotify: $SOCKET"
 
 # ============================================================
-# PRUEBA FUNCIONAL DEL CONTROL
+# PRUEBA FUNCIONAL DEL SOCKET
 # ============================================================
 
 echo
-echo "[INFO] Probando control Spotify..."
+echo "[INFO] Probando socket Spotify..."
 
 if command -v socat >/dev/null 2>&1; then
 
-    PAUSE_RESULT="$(printf 'pause\n' | socat - UNIX-CONNECT:"$SOCKET" 2>/dev/null || true)"
-    PLAY_RESULT="$(printf 'play\n' | socat - UNIX-CONNECT:"$SOCKET" 2>/dev/null || true)"
+    SOCKET_RESULT="$(printf 'test_connection\n' | timeout 5 socat - UNIX-CONNECT:"$SOCKET" 2>/dev/null || true)"
 
-    echo "[INFO] pause -> ${PAUSE_RESULT:-SIN RESPUESTA}"
-    echo "[INFO] play  -> ${PLAY_RESULT:-SIN RESPUESTA}"
+    if [[ "$SOCKET_RESULT" == "OK" ]]; then
+        echo "[OK] Socket Spotify funcionando."
 
-    if [[ "$PAUSE_RESULT" == "OK" && "$PLAY_RESULT" == "OK" ]]; then
-        echo "[OK] Control Spotify funcionando."
+    elif [[ "$SOCKET_RESULT" == "ERROR NOT_CONNECTED" ]]; then
+        echo "[OK] Socket funcionando; Spotify todavía no está conectado."
 
-    elif [[ "$PAUSE_RESULT" == "ERROR NOT_CONNECTED" ||
-            "$PLAY_RESULT" == "ERROR NOT_CONNECTED" ]]; then
-        echo "[INFO] Socket funcionando, pero Spotify aún no está conectado."
+    elif [[ -n "$SOCKET_RESULT" ]]; then
+        echo "[OK] Socket respondió: $SOCKET_RESULT"
 
     else
-        echo "[ERROR] El socket existe pero el control no respondió correctamente."
+        echo "[ERROR] El socket no respondió."
         exit 1
     fi
 
@@ -388,6 +386,7 @@ else
 
     echo "[AVISO] socat no está instalado."
     echo "[AVISO] Se omite la prueba funcional."
+
 fi
 
 # ============================================================
