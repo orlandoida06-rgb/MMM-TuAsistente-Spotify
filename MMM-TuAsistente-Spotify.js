@@ -15,6 +15,7 @@ Module.register("MMM-TuAsistente-Spotify", {
     this.spotify = {
       connected: false,
       authenticated: false,
+      oauthAuthenticated: false,
       playing: false,
       loading: false,
       title: "",
@@ -38,7 +39,12 @@ Module.register("MMM-TuAsistente-Spotify", {
     this.sendSocketNotification(
       "SPOTIFY_INIT",
       {
-        socketPath: this.config.socketPath
+        socketPath: this.config.socketPath,
+        spotifyClientId: this.config.spotifyClientId,
+        spotifyClientSecret: this.config.spotifyClientSecret,
+        spotifyRedirectUri:
+          this.config.spotifyRedirectUri ||
+          "http://127.0.0.1:8888/callback"
       }
     );
   },
@@ -94,7 +100,7 @@ Module.register("MMM-TuAsistente-Spotify", {
        AUTH
        ====================================================== */
 
-    if (!this.spotify.authenticated) {
+    if (!this.spotify.oauthAuthenticated) {
 
       const authBox =
         document.createElement("div");
@@ -109,9 +115,37 @@ Module.register("MMM-TuAsistente-Spotify", {
         "spotify-auth-text";
 
       authText.innerHTML =
-        "Conecta tu cuenta de Spotify";
+        "🎵 Configurar Spotify";
 
       authBox.appendChild(authText);
+
+      const description =
+        document.createElement("div");
+
+      description.className =
+        "spotify-auth-description";
+
+      description.innerHTML =
+        "Introduce tu Client ID de Spotify para conectar tu cuenta.";
+
+      authBox.appendChild(description);
+
+      const clientInput =
+        document.createElement("input");
+
+      clientInput.type =
+        "text";
+
+      clientInput.className =
+        "spotify-client-id";
+
+      clientInput.placeholder =
+        "Spotify Client ID";
+
+      clientInput.autocomplete =
+        "off";
+
+      authBox.appendChild(clientInput);
 
       const authButton =
         document.createElement("button");
@@ -120,18 +154,99 @@ Module.register("MMM-TuAsistente-Spotify", {
         "spotify-auth-button";
 
       authButton.innerHTML =
-        "🎵 Conectar con Spotify";
+        "🔐 Iniciar sesión con Spotify";
 
-      authButton.onclick = () => {
+      authButton.onclick = async () => {
 
-        this.sendSocketNotification(
-          "SPOTIFY_AUTH"
-        );
+        const clientId =
+          clientInput.value.trim();
+
+        if (!clientId) {
+
+          description.innerHTML =
+            "⚠️ Introduce el Client ID de Spotify.";
+
+          return;
+        }
+
+        authButton.disabled =
+          true;
+
+        authButton.innerHTML =
+          "⏳ Preparando Spotify...";
+
+        description.innerHTML =
+          "Guardando configuración...";
+
+        try {
+
+          const response =
+            await fetch(
+              "http://127.0.0.1:8888/oauth/config",
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type":
+                    "application/json"
+                },
+                body: JSON.stringify({
+                  clientId:
+                    clientId
+                })
+              }
+            );
+
+          const data =
+            await response.json();
+
+          if (!response.ok || !data.authUrl) {
+
+            throw new Error(
+              data.error ||
+              "No se pudo preparar OAuth"
+            );
+          }
+
+          description.innerHTML =
+            "✓ Configurado. Abriendo Spotify...";
+
+          authButton.innerHTML =
+            "🎵 Abriendo Spotify...";
+
+          window.open(
+            data.authUrl,
+            "_blank"
+          );
+
+        } catch (err) {
+
+          console.error(
+            "[MMM-TuAsistente-Spotify] Error OAuth gráfico:",
+            err
+          );
+
+          description.innerHTML =
+            "❌ " +
+            (
+              err.message ||
+              "Error configurando Spotify"
+            );
+
+          authButton.disabled =
+            false;
+
+          authButton.innerHTML =
+            "🔐 Intentar de nuevo";
+        }
       };
 
-      authBox.appendChild(authButton);
+      authBox.appendChild(
+        authButton
+      );
 
-      wrapper.appendChild(authBox);
+      wrapper.appendChild(
+        authBox
+      );
 
     } else {
 
@@ -631,6 +746,9 @@ Module.register("MMM-TuAsistente-Spotify", {
 
         this.spotify.authenticated =
           !!payload.authenticated;
+
+        this.spotify.oauthAuthenticated =
+          !!payload.oauthAuthenticated;
 
         if (this.spotify.authenticated) {
           this.spotifyHidden = false;

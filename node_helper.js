@@ -13,12 +13,20 @@ module.exports = NodeHelper.create({
     this.socketPath = "/tmp/tuasistente-spotify.sock";
     this.eventsPath = "/tmp/tuasistente-spotify-events.ndjson";
 
+    // OAuth se configura desde config.js mediante SPOTIFY_INIT.
     this.oauthConfigPath = __dirname + "/spotify.oauth.json";
     this.tokenPath = __dirname + "/spotify.token.json";
+
+    this.oauthConfig = {
+      clientId: "",
+      clientSecret: "",
+      redirectUri: "http://127.0.0.1:8888/callback"
+    };
 
     this.spotify = {
       connected: false,
       authenticated: false,
+      librespotAuthenticated: false,
       playing: false,
       loading: false,
       title: "",
@@ -39,14 +47,89 @@ module.exports = NodeHelper.create({
     // Caché de portadas obtenidas directamente desde Spotify
     this.coverCache = new Map();
 
-    this.loadOAuthConfig();
+    // OAuth se configura desde config.js mediante SPOTIFY_INIT.
     this.loadToken();
     this.startOAuthServer();
     this.startEventsWatcher();
 
+    // ========================================================
+    // LIBRESPOT - ESTADO DE AUTENTICACIÓN
+    // ========================================================
+    // La cuenta de Spotify la gestiona LibreSpot mediante
+    // Spotify Connect/Zeroconf. No usamos OAuth del módulo.
+    // ========================================================
+
+    this.checkLibrespotAuth();
+
+    this.librespotAuthTimer = setInterval(() => {
+      this.checkLibrespotAuth();
+    }, 2000);
+
     setTimeout(() => {
       this.sendAuthState();
     }, 1000);
+  },
+
+  // ========================================================
+  // COMPROBAR AUTENTICACIÓN REAL DE LIBRESPOT
+  // ========================================================
+  checkLibrespotAuth: function () {
+
+    const fs = require("fs");
+    const { execFile } = require("child_process");
+
+    const credentialsPath =
+      "/home/pi/.config/tuasistente/librespot/credentials.json";
+
+    const socketPath =
+      "/tmp/tuasistente-spotify.sock";
+
+    const credentialsExist =
+      fs.existsSync(credentialsPath);
+
+    const socketExists =
+      fs.existsSync(socketPath);
+
+    execFile(
+      "systemctl",
+      [
+        "is-active",
+        "tuasistente-spotify.service"
+      ],
+      (error, stdout) => {
+
+        const serviceActive =
+          !error &&
+          stdout.trim() === "active";
+
+        const librespotAuthenticated =
+          serviceActive &&
+          socketExists &&
+          credentialsExist;
+
+        const changed =
+          this.spotify.librespotAuthenticated !== librespotAuthenticated ||
+          this.spotify.connected !== serviceActive;
+
+        this.spotify.librespotAuthenticated =
+          librespotAuthenticated;
+
+        this.spotify.connected =
+          serviceActive;
+
+        if (changed) {
+
+          console.log(
+            "[MMM-TuAsistente-Spotify] LibreSpot -> " +
+            (librespotAuthenticated
+              ? "Spotify conectado"
+              : "Spotify esperando conexión")
+          );
+
+          this.sendAuthState();
+        }
+      }
+    );
   },
 
   loadOAuthConfig: function () {
@@ -54,15 +137,20 @@ module.exports = NodeHelper.create({
     try {
 
       if (!fs.existsSync(this.oauthConfigPath)) {
-        console.error(
-          "[MMM-TuAsistente-Spotify] Falta spotify.oauth.json"
+        console.log(
+          "[MMM-TuAsistente-Spotify] OAuth se configurará desde config.js"
         );
         return;
       }
 
-      this.oauthConfig = JSON.parse(
+      const fileConfig = JSON.parse(
         fs.readFileSync(this.oauthConfigPath, "utf8")
       );
+
+      this.oauthConfig = {
+        ...this.oauthConfig,
+        ...fileConfig
+      };
 
       if (!this.oauthConfig.clientId) {
         console.error(
@@ -377,6 +465,13 @@ module.exports = NodeHelper.create({
           this.oauthConfig.clientId
         );
 
+        if (this.oauthConfig.clientSecret) {
+          body.set(
+            "client_secret",
+            this.oauthConfig.clientSecret
+          );
+        }
+
         body.set(
           "grant_type",
           "authorization_code"
@@ -571,6 +666,13 @@ module.exports = NodeHelper.create({
       body.set("grant_type", "refresh_token");
       body.set("refresh_token", this.token.refresh_token);
       body.set("client_id", this.oauthConfig.clientId);
+
+      if (this.oauthConfig.clientSecret) {
+        body.set(
+          "client_secret",
+          this.oauthConfig.clientSecret
+        );
+      }
 
       const response = await fetch(
         "https://accounts.spotify.com/api/token",
@@ -797,7 +899,16 @@ module.exports = NodeHelper.create({
       "SPOTIFY_AUTH_STATE",
       {
         authenticated:
-          !!this.spotify.authenticated
+          !!this.spotify.authenticated,
+
+        oauthAuthenticated:
+          !!this.spotify.authenticated,
+
+        librespotAuthenticated:
+          !!this.spotify.librespotAuthenticated,
+
+        connected:
+          !!this.spotify.connected
       }
     );
   },
@@ -913,8 +1024,35 @@ module.exports = NodeHelper.create({
       if (notification === "SPOTIFY_INIT") {
 
         if (payload && payload.socketPath) {
-          this.socketPath =
-            payload.socketPath;
+          this.socketPath = payload.socketPath;
+        }
+
+        if (payload) {
+          console.log(
+            "[MMM-TuAsistente-Spotify] SPOTIFY_INIT recibido:",
+            {
+              clientId: !!payload.spotifyClientId,
+              clientSecret: !!payload.spotifyClientSecret,
+              redirectUri: payload.spotifyRedirectUri || null
+            }
+          );
+
+          this.oauthConfig = this.oauthConfig || {};
+
+          if (payload.spotifyClientId) {
+            this.oauthConfig.clientId =
+              payload.spotifyClientId;
+          }
+
+          if (payload.spotifyClientSecret) {
+            this.oauthConfig.clientSecret =
+              payload.spotifyClientSecret;
+          }
+
+          if (payload.spotifyRedirectUri) {
+            this.oauthConfig.redirectUri =
+              payload.spotifyRedirectUri;
+          }
         }
 
         this.sendCommand(
@@ -946,6 +1084,23 @@ module.exports = NodeHelper.create({
           this.createAuthUrl();
 
         if (url) {
+
+          const { execFile } =
+            require("child_process");
+
+          execFile(
+            "env",
+            ["DISPLAY=:0", "xdg-open", url],
+            error => {
+
+              if (error) {
+                console.error(
+                  "[MMM-TuAsistente-Spotify] Error abriendo OAuth:",
+                  error.message
+                );
+              }
+            }
+          );
 
           this.sendSocketNotification(
             "SPOTIFY_AUTH_URL",
