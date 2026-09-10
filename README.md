@@ -44,7 +44,6 @@ Para configurar OAuth:
 
 `./configure_spotify.sh`
 
-Las credenciales y tokens son privados y no deben subirse al repositorio.
 
 ## LibreSpot
 
@@ -110,5 +109,5 @@ Se utilizan para actualizar en tiempo real:
 
 ## Integración con MMM-TuAsistente
 
-El módulo puede recibir órdenes de voz desde MMM-TuAsistente, permitiendo controlar la reproducción sin utilizar la pantalla.
+El módulo puede recibir órdenes de voz desde MMM-TuAsistente
 
